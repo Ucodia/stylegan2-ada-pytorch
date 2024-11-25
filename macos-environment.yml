@@ -1,0 +1,18 @@
+name: stylegan2
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - click=8.1.7
+  - ninja=1.12.1
+  - python=3.9.20
+  - pytorch=2.5.1
+  - requests=2.32.3
+  - tqdm=4.67.1
+  - pip:
+      - imageio==2.33.1
+      - imageio-ffmpeg==0.4.3
+      - numpy==1.26.4
+      - pillow==8.4.0
+      - pyspng==0.1.2
