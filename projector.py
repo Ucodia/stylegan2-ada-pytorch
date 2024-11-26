@@ -22,12 +22,15 @@ import torch.nn.functional as F
 import dnnlib
 import legacy
 
+# Number of samples for W mean and std computation
+W_AVG_SAMPLES = 10000
+
 def project(
     G,
     target: torch.Tensor, # [C,H,W] and dynamic range [0,255], W & H must match G output resolution
     *,
     num_steps                  = 1000,
-    w_avg_samples              = 10000,
+    w_avg_samples              = W_AVG_SAMPLES,
     initial_learning_rate      = 0.1,
     initial_noise_factor       = 0.05,
     lr_rampdown_length         = 0.25,
@@ -147,6 +150,7 @@ def project(
 @click.option('--num-steps',              help='Number of optimization steps per target', type=int, default=1000, show_default=True)
 @click.option('--seed',                   help='Random seed', type=int, default=303, show_default=True)
 @click.option('--save-video',             help='Save an mp4 video of optimization progress', type=bool, default=True, show_default=True)
+@click.option('--loop',                   help='Loop back to the starting point', is_flag=True)
 @click.option('--outdir',                 help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
     network_pkl: str,
@@ -154,7 +158,8 @@ def run_projection(
     outdir: str,
     save_video: bool,
     seed: int,
-    num_steps: int
+    num_steps: int,
+    loop: bool
 ):
     """Project given images to the latent space of pretrained network pickle.
 
@@ -180,6 +185,19 @@ def run_projection(
     video = None
     if save_video:
         video = imageio.get_writer(f'{outdir}/proj.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
+
+    # Store initial w_avg if looping is enabled using the same computation as in project()
+    initial_w = None
+    if loop:
+        # Compute w_avg the same way as in project()
+        z_samples = np.random.RandomState(123).randn(W_AVG_SAMPLES, G.z_dim)
+        if device.type == 'mps':
+            z_samples = z_samples.astype(np.float32)
+        w_samples = G.mapping(torch.from_numpy(z_samples).to(device), None)  # [N, L, C]
+        w_samples = w_samples[:, :1, :].cpu().numpy().astype(np.float32)       # [N, 1, C]
+        w_avg = np.mean(w_samples, axis=0, keepdims=True)      # [1, 1, C]
+        initial_w = torch.tensor(w_avg, dtype=torch.float32, device=device)
+        initial_w = initial_w.repeat([1, G.mapping.num_ws, 1])  # Expand to W+ space for synthesis
 
     last_w = None
     # Process each target sequentially
@@ -212,7 +230,7 @@ def run_projection(
         synth_image = G.synthesis(projected_w, noise_mode='const')
         synth_image = (synth_image + 1) * (255/2)
         synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-        PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{idx:04d}.png')
+        PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj{idx:04d}.png')
         np.savez(f'{outdir}/projected_w{idx:04d}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
 
         if save_video:
@@ -228,6 +246,37 @@ def run_projection(
 
         # Update last_w for next iteration with proper dimensions
         last_w = projected_w.clone().detach()
+
+    # If looping, add one more projection back to the initial w_avg
+    if loop and initial_w is not None:
+        print('\nProcessing final loop back to start')
+        last_projected_w = last_w.clone()
+        
+        # Create a synthetic target from initial_w
+        synth_image = G.synthesis(initial_w, noise_mode='const')
+        synth_image = (synth_image + 1) * (255/2)
+        target_uint8 = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+        
+        # Project to the initial point
+        projected_w_steps = project(
+            G,
+            target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),
+            num_steps=num_steps,
+            device=device,
+            verbose=True,
+            starting_w=last_projected_w
+        )
+
+        if save_video:
+            print('Saving frames for loop back')
+            for w in projected_w_steps:
+                w_full = w.unsqueeze(0).repeat([1, G.mapping.num_ws, 1])
+                synth_image = G.synthesis(w_full, noise_mode='const')
+                synth_image = (synth_image + 1) * (255/2)
+                synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+                frame = np.concatenate([target_uint8, synth_image], axis=1)
+                if video is not None:
+                    video.append_data(frame)
 
     if video is not None:
         video.close()
