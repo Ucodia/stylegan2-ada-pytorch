@@ -35,7 +35,8 @@ def project(
     noise_ramp_length          = 0.75,
     regularize_noise_weight    = 1e5,
     verbose                    = False,
-    device: torch.device
+    device: torch.device,
+    starting_w                 = None
 ):
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
 
@@ -69,7 +70,13 @@ def project(
         target_images = F.interpolate(target_images, size=(256, 256), mode='area')
     target_features = vgg16(target_images, resize_images=False, return_lpips=True)
 
-    w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True) # pylint: disable=not-callable
+    # Modify w_opt initialization to use starting_w if provided
+    if starting_w is not None:
+        # starting_w should be [1, num_ws, C], we want [1, C]
+        w_opt = starting_w[:, 0, :].clone().detach().requires_grad_(True)
+    else:
+        w_opt = torch.tensor(w_avg, dtype=torch.float32, device=device, requires_grad=True)
+
     w_out = torch.zeros([num_steps] + list(w_opt.shape[1:]), dtype=torch.float32, device=device)
     optimizer = torch.optim.Adam([w_opt] + list(noise_bufs.values()), betas=(0.9, 0.999), lr=initial_learning_rate)
 
@@ -130,81 +137,100 @@ def project(
                 buf -= buf.mean()
                 buf *= buf.square().mean().rsqrt()
 
-    return w_out.repeat([1, G.mapping.num_ws, 1])
+    return w_out.clone()
 
 #----------------------------------------------------------------------------
 
 @click.command()
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
-@click.option('--target', 'target_fname', help='Target image file to project to', required=True, metavar='FILE')
-@click.option('--num-steps',              help='Number of optimization steps', type=int, default=1000, show_default=True)
+@click.option('--targets',                help='Comma-separated list of target image files to project to', required=True, metavar='FILES')
+@click.option('--num-steps',              help='Number of optimization steps per target', type=int, default=1000, show_default=True)
 @click.option('--seed',                   help='Random seed', type=int, default=303, show_default=True)
 @click.option('--save-video',             help='Save an mp4 video of optimization progress', type=bool, default=True, show_default=True)
 @click.option('--outdir',                 help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
     network_pkl: str,
-    target_fname: str,
+    targets: str,
     outdir: str,
     save_video: bool,
     seed: int,
     num_steps: int
 ):
-    """Project given image to the latent space of pretrained network pickle.
+    """Project given images to the latent space of pretrained network pickle.
 
     Examples:
 
     \b
-    python projector.py --outdir=out --target=~/mytargetimg.png \\
+    python projector.py --outdir=out --targets=~/mytargetimg.png \\
         --network=https://nvlabs-fi-cdn.nvidia.com/stylegan2-ada-pytorch/pretrained/ffhq.pkl
     """
     np.random.seed(seed)
     torch.manual_seed(seed)
 
+    target_fnames = [f.strip() for f in targets.split(',')]
+    print(f'Processing {len(target_fnames)} targets: {target_fnames}')
+
     # Load networks.
     print('Loading networks from "%s"...' % network_pkl)
     device = torch.device('mps')
     with dnnlib.util.open_url(network_pkl) as fp:
-        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
+        G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device)
 
-    # Load target image.
-    target_pil = PIL.Image.open(target_fname).convert('RGB')
-    w, h = target_pil.size
-    s = min(w, h)
-    target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
-    target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
-    target_uint8 = np.array(target_pil, dtype=np.uint8)
-
-    # Optimize projection.
-    start_time = perf_counter()
-    projected_w_steps = project(
-        G,
-        target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device), # pylint: disable=not-callable
-        num_steps=num_steps,
-        device=device,
-        verbose=True
-    )
-    print (f'Elapsed: {(perf_counter()-start_time):.1f} s')
-
-    # Render debug output: optional video and projected image and W vector.
     os.makedirs(outdir, exist_ok=True)
+    video = None
     if save_video:
         video = imageio.get_writer(f'{outdir}/proj.mp4', mode='I', fps=10, codec='libx264', bitrate='16M')
-        print (f'Saving optimization progress video "{outdir}/proj.mp4"')
-        for projected_w in projected_w_steps:
-            synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
-            synth_image = (synth_image + 1) * (255/2)
-            synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-            video.append_data(np.concatenate([target_uint8, synth_image], axis=1))
-        video.close()
 
-    # Save final projected frame and W vector.
-    target_pil.save(f'{outdir}/target.png')
-    projected_w = projected_w_steps[-1]
-    synth_image = G.synthesis(projected_w.unsqueeze(0), noise_mode='const')
-    synth_image = (synth_image + 1) * (255/2)
-    synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-    PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj.png')
-    np.savez(f'{outdir}/projected_w.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    last_w = None
+    # Process each target sequentially
+    for idx, target_fname in enumerate(target_fnames):
+        print(f'\nProcessing target {idx + 1}/{len(target_fnames)}: {target_fname}')
+        
+        # Load target image
+        target_pil = PIL.Image.open(target_fname).convert('RGB')
+        w, h = target_pil.size
+        s = min(w, h)
+        target_pil = target_pil.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+        target_pil = target_pil.resize((G.img_resolution, G.img_resolution), PIL.Image.LANCZOS)
+        target_uint8 = np.array(target_pil, dtype=np.uint8)
+
+        # Optimize projection
+        start_time = perf_counter()
+        projected_w_steps = project(
+            G,
+            target=torch.tensor(target_uint8.transpose([2, 0, 1]), device=device),
+            num_steps=num_steps,
+            device=device,
+            verbose=True,
+            starting_w=last_w
+        )
+        print(f'Elapsed: {(perf_counter()-start_time):.1f} s')
+
+        # Save intermediate results
+        target_pil.save(f'{outdir}/target{idx:04d}.png')
+        projected_w = projected_w_steps[-1].unsqueeze(0).repeat([1, G.mapping.num_ws, 1])
+        synth_image = G.synthesis(projected_w, noise_mode='const')
+        synth_image = (synth_image + 1) * (255/2)
+        synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+        PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj_{idx:04d}.png')
+        np.savez(f'{outdir}/projected_w{idx:04d}.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+
+        if save_video:
+            print(f'Saving frames for target {idx + 1}')
+            for w in projected_w_steps:
+                w_full = w.unsqueeze(0).repeat([1, G.mapping.num_ws, 1])
+                synth_image = G.synthesis(w_full, noise_mode='const')
+                synth_image = (synth_image + 1) * (255/2)
+                synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
+                frame = np.concatenate([target_uint8, synth_image], axis=1)
+                if video is not None:
+                    video.append_data(frame)
+
+        # Update last_w for next iteration with proper dimensions
+        last_w = projected_w.clone().detach()
+
+    if video is not None:
+        video.close()
 
 #----------------------------------------------------------------------------
 
