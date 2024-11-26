@@ -150,6 +150,7 @@ def project(
 @click.option('--num-steps',              help='Number of optimization steps per target', type=int, default=1000, show_default=True)
 @click.option('--seed',                   help='Random seed', type=int, default=303, show_default=True)
 @click.option('--save-video',             help='Save an mp4 video of optimization progress', type=bool, default=True, show_default=True)
+@click.option('--portrait-video',         help='Stack video frames vertically instead of horizontally', is_flag=True)
 @click.option('--loop',                   help='Loop back to the starting point', is_flag=True)
 @click.option('--outdir',                 help='Where to save the output images', required=True, metavar='DIR')
 def run_projection(
@@ -157,6 +158,7 @@ def run_projection(
     targets: str,
     outdir: str,
     save_video: bool,
+    portrait_video: bool,
     seed: int,
     num_steps: int,
     loop: bool
@@ -240,7 +242,7 @@ def run_projection(
                 synth_image = G.synthesis(w_full, noise_mode='const')
                 synth_image = (synth_image + 1) * (255/2)
                 synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-                frame = np.concatenate([target_uint8, synth_image], axis=1)
+                frame = np.concatenate([target_uint8, synth_image], axis=0 if portrait_video else 1)
                 if video is not None:
                     video.append_data(frame)
 
@@ -274,7 +276,7 @@ def run_projection(
                 synth_image = G.synthesis(w_full, noise_mode='const')
                 synth_image = (synth_image + 1) * (255/2)
                 synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
-                frame = np.concatenate([target_uint8, synth_image], axis=1)
+                frame = np.concatenate([target_uint8, synth_image], axis=0 if portrait_video else 1)
                 if video is not None:
                     video.append_data(frame)
 
