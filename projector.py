@@ -39,7 +39,8 @@ def project(
     regularize_noise_weight    = 1e5,
     verbose                    = False,
     device: torch.device,
-    starting_w                 = None
+    starting_w                 = None,
+    min_dist                   = None
 ):
     assert target.shape == (G.img_channels, G.img_resolution, G.img_resolution)
 
@@ -140,6 +141,13 @@ def project(
                 buf -= buf.mean()
                 buf *= buf.square().mean().rsqrt()
 
+        # Check if we've reached minimum distance
+        if min_dist is not None and dist < min_dist:
+            logprint(f'Reached target distance {dist:<4.2f} < {min_dist} at step {step+1}')
+            # Trim w_out to actual steps performed
+            w_out = w_out[:step + 1]
+            break
+
     return w_out.clone()
 
 #----------------------------------------------------------------------------
@@ -148,6 +156,7 @@ def project(
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--targets',                help='Comma-separated list of target image files to project to', required=True, metavar='FILES')
 @click.option('--num-steps',              help='Number of optimization steps per target', type=int, default=1000, show_default=True)
+@click.option('--min-dist',               help='Stop when reaching minimum distance', type=float)
 @click.option('--seed',                   help='Random seed', type=int, default=303, show_default=True)
 @click.option('--save-video',             help='Save an mp4 video of optimization progress', type=bool, default=True, show_default=True)
 @click.option('--portrait-video',         help='Stack video frames vertically instead of horizontally', is_flag=True)
@@ -161,6 +170,7 @@ def run_projection(
     portrait_video: bool,
     seed: int,
     num_steps: int,
+    min_dist: float,
     loop: bool
 ):
     """Project given images to the latent space of pretrained network pickle.
@@ -222,7 +232,8 @@ def run_projection(
             num_steps=num_steps,
             device=device,
             verbose=True,
-            starting_w=last_w
+            starting_w=last_w,
+            min_dist=min_dist
         )
         print(f'Elapsed: {(perf_counter()-start_time):.1f} s')
 
@@ -266,7 +277,8 @@ def run_projection(
             num_steps=num_steps,
             device=device,
             verbose=True,
-            starting_w=last_projected_w
+            starting_w=last_projected_w,
+            min_dist=min_dist
         )
 
         if save_video:
