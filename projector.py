@@ -162,7 +162,7 @@ def run_projection(
 
     # Load networks.
     print('Loading networks from "%s"...' % network_pkl)
-    device = torch.device('mps')
+    device = torch.device('mps' if torch.backends.mps.is_available() else 'cuda')
     with dnnlib.util.open_url(network_pkl) as fp:
         G = legacy.load_network_pkl(fp)['G_ema'].requires_grad_(False).to(device) # type: ignore
 
