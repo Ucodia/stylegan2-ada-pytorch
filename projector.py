@@ -205,6 +205,8 @@ def run_projection(
     synth_image = synth_image.permute(0, 2, 3, 1).clamp(0, 255).to(torch.uint8)[0].cpu().numpy()
     PIL.Image.fromarray(synth_image, 'RGB').save(f'{outdir}/proj.png')
     np.savez(f'{outdir}/projected_w.npz', w=projected_w.unsqueeze(0).cpu().numpy())
+    np.save(f'{outdir}/projected_w.npy', projected_w.unsqueeze(0).cpu().numpy())
+    torch.save(projected_w.unsqueeze(0).cpu(), f'{outdir}/projected_w.pt')
 
 #----------------------------------------------------------------------------
 
